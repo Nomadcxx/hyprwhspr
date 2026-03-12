@@ -153,6 +153,18 @@ def main():
     speak_parser.add_argument('--text', metavar='TEXT', help='Text to read (default: primary selection, then clipboard)')
     speak_parser.add_argument('--clipboard', action='store_true', help='Use clipboard instead of primary selection')
     speak_parser.add_argument('--voice', metavar='VOICE', help='Voice to use (default: from config)')
+    speak_parser.add_argument(
+        '--provider',
+        metavar='PROVIDER',
+        help='Override TTS provider for this invocation (e.g. openai, elevenlabs)',
+        default=None,
+    )
+    speak_parser.add_argument(
+        '--model',
+        metavar='MODEL',
+        help='Override TTS model for this invocation (e.g. tts-1, eleven_turbo_v2_5)',
+        default=None,
+    )
 
     # record command (for external hotkey systems)
     record_parser = subparsers.add_parser('record', help='Control recording (for external hotkeys)')
@@ -322,4 +334,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

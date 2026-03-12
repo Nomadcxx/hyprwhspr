@@ -726,6 +726,44 @@ Voice licenses and audio samples: [Kyutai TTS Voices on Hugging Face](https://hu
 }
 ```
 
+### Cloud TTS Providers
+
+In addition to the default local pocket-tts backend, hyprwhspr supports cloud TTS providers
+for lower latency and higher quality synthesis.
+
+| Provider | Streaming | Latency | Notes |
+|----------|-----------|---------|-------|
+| `openai` | Yes | ~200ms | Models: gpt-4o-mini-tts, tts-1, tts-1-hd |
+| `groq` | Yes | ~200ms | Powered by PlayAI |
+| `elevenlabs` | Yes | ~75ms | Lowest latency option |
+| `deepgram` | No | ~300ms | Aura 2 voices |
+| `lemonfox` | No | ~300ms | OpenAI-compatible |
+
+**Setup:** Run `hyprwhspr setup` and choose "cloud" when prompted for TTS backend.
+
+**Config keys:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tts_provider` | `pocket-tts` | `pocket-tts` or a cloud provider ID |
+| `tts_cloud_model` | `null` | Provider model ID (`null` = provider default) |
+| `tts_cloud_voice` | `null` | Provider voice ID (`null` = provider default) |
+
+**Manual configuration example (ElevenLabs):**
+
+```json
+{
+  "tts_provider": "elevenlabs",
+  "tts_cloud_model": "eleven_turbo_v2_5",
+  "tts_cloud_voice": "aria"
+}
+```
+
+Then run `hyprwhspr setup` to store your API key securely.
+
+**Sharing keys with STT:** If you already use ElevenLabs or OpenAI for STT,
+the same API key is reused automatically - no second entry needed.
+
 ### Usage
 
 - **Shortcut**: Press `tts_shortcut` (default SUPER+ALT+S) to read the currently selected text or clipboard.

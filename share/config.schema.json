@@ -339,6 +339,22 @@
       "default": "alba",
       "description": "Pocket TTS voice: alba, marius, javert, jean, fantine, cosette, eponine, azelma"
     },
+    "tts_provider": {
+      "type": "string",
+      "default": "pocket-tts",
+      "enum": ["pocket-tts", "openai", "groq", "elevenlabs", "deepgram", "lemonfox"],
+      "description": "TTS provider: pocket-tts (local) or a cloud provider"
+    },
+    "tts_cloud_model": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Cloud TTS model name (provider-specific)"
+    },
+    "tts_cloud_voice": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Cloud TTS voice name (provider-specific)"
+    },
     "tts_volume": {
       "type": "number",
       "default": 1.0,

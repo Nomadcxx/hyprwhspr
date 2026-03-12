@@ -15,6 +15,15 @@ except ImportError:
     from paths import TEMP_DIR
     from audio_manager import AudioManager
 
+try:
+    import requests as _requests
+    from .tts_provider_registry import get_provider as _get_tts_provider
+    from .credential_manager import get_credential as _get_credential
+except ImportError:
+    import requests as _requests
+    from tts_provider_registry import get_provider as _get_tts_provider
+    from credential_manager import get_credential as _get_credential
+
 # Pocket TTS built-in voices (English only)
 POCKET_TTS_VOICES = [
     'alba', 'marius', 'javert', 'jean', 'fantine',
@@ -54,6 +63,11 @@ class TTSManager:
         else:
             self.voice = 'alba'
             self.volume = 1.0
+
+        self.provider = self.config_manager.get_setting('tts_provider', 'pocket-tts') if self.config_manager else 'pocket-tts'
+        self.cloud_model = self.config_manager.get_setting('tts_cloud_model', None) if self.config_manager else None
+        self.cloud_voice = self.config_manager.get_setting('tts_cloud_voice', None) if self.config_manager else None
+        self._audio_manager = AudioManager()
 
     def estimate_speech_duration(self, text: str, words_per_minute: float = 150.0) -> float:
         """Estimate speaking duration in seconds from text (~150 WPM typical for TTS)."""
@@ -301,9 +315,169 @@ class TTSManager:
             return None
 
     def is_available(self) -> bool:
-        """Check if Pocket TTS is available (installed and importable)."""
-        try:
-            import pocket_tts  # noqa: F401
-            return True
-        except ImportError:
+        """Check if TTS is usable: pocket-tts importable, or cloud key stored."""
+        if self.provider == 'pocket-tts':
+            try:
+                import pocket_tts  # noqa: F401
+                return True
+            except ImportError:
+                return False
+        return bool(_get_credential(self.provider))
+
+    def speak(self, text: str, voice: Optional[str] = None, progress_callback=None) -> bool:
+        """
+        Top-level TTS entry point. Routes to pocket-tts or cloud provider.
+        Returns True on success, False on failure.
+        progress_callback(state: str, progress: float) - states: fetching, playing, error.
+        """
+        if self.provider == 'pocket-tts':
+            on_started = (lambda: progress_callback('playing', 0.5)) if progress_callback else None
+            return self.synthesize_and_play_streaming(
+                text, voice=voice, on_playback_started=on_started
+            )
+        return self._speak_cloud(text, voice=voice, progress_callback=progress_callback)
+
+    def _build_tts_url(self, provider: dict, voice: Optional[str]) -> str:
+        """Build request URL, substituting voice_id for ElevenLabs."""
+        url = provider['endpoint']
+        if provider.get('endpoint_uses_voice_in_url'):
+            selected_voice = voice or provider['default_voice']
+            url = url.replace('{voice_id}', selected_voice)
+        return url
+
+    def _build_tts_headers(self, provider: dict, api_key: str) -> dict:
+        """Build auth headers. ElevenLabs uses xi-api-key directly; others use Authorization."""
+        prefix = provider.get('api_key_prefix', '')
+        return {provider['api_key_header']: f"{prefix}{api_key}"}
+
+    def _build_tts_request(
+        self,
+        provider: dict,
+        text: str,
+        voice: Optional[str],
+        model: Optional[str],
+    ):
+        """
+        Build (body_dict, query_params_dict).
+        Uses request_text_field from registry so no provider-specific branching here.
+        """
+        selected_voice = voice or provider['default_voice']
+        selected_model = model or provider['default_model']
+        params = {}
+        text_field = provider['request_text_field']
+        body: dict = {text_field: text}
+
+        if provider.get('voice_as_query_param'):
+            params['model'] = selected_voice
+        elif not provider.get('endpoint_uses_voice_in_url'):
+            body['voice'] = selected_voice
+
+        if provider.get('endpoint_uses_voice_in_url'):
+            body['model_id'] = selected_model
+        elif not provider.get('voice_as_query_param'):
+            body['model'] = selected_model
+
+        return body, params
+
+    def _speak_cloud(self, text: str, voice: str = None, progress_callback=None) -> bool:
+        """Dispatch to streaming or request/response cloud TTS path."""
+        provider = _get_tts_provider(self.provider)
+        if not provider:
+            _log_tts(f"Unknown TTS provider: {self.provider}")
             return False
+
+        api_key = _get_credential(self.provider)
+        if not api_key:
+            _log_tts(f"No API key stored for {self.provider}. Run: hyprwhspr setup")
+            return False
+
+        effective_voice = voice or self.cloud_voice
+        url = self._build_tts_url(provider, effective_voice)
+        headers = self._build_tts_headers(provider, api_key)
+        body, params = self._build_tts_request(
+            provider, text, effective_voice, self.cloud_model
+        )
+
+        if progress_callback:
+            progress_callback('fetching', 0.0)
+
+        try:
+            if provider['streaming']:
+                return self._stream_to_player(url, headers, body, params, progress_callback)
+            return self._request_and_play(url, headers, body, params, progress_callback)
+        except Exception as e:
+            _log_tts(f"Cloud TTS failed ({self.provider}): {e}")
+            if progress_callback:
+                progress_callback('error', 0.0)
+            try:
+                import pocket_tts  # noqa: F401
+                _log_tts("Falling back to pocket-tts")
+                on_started = (lambda: progress_callback('playing', 0.5)) if progress_callback else None
+                return self.synthesize_and_play_streaming(text, voice=voice, on_playback_started=on_started)
+            except ImportError:
+                return False
+
+    def _stream_to_player(
+        self,
+        url: str,
+        headers: dict,
+        body: dict,
+        params: dict,
+        progress_callback=None,
+    ) -> bool:
+        """
+        Stream audio chunks from cloud provider to ffplay stdin.
+        First audio plays within one buffered chunk for fast providers.
+        """
+        import subprocess as _subprocess
+
+        vol = int(self.volume * 100) if self.volume is not None else 100
+        player = _subprocess.Popen(
+            ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'error',
+             '-volume', str(vol), '-i', 'pipe:0'],
+            stdin=_subprocess.PIPE,
+        )
+        try:
+            with _requests.post(
+                url,
+                headers=headers,
+                json=body,
+                params=params,
+                stream=True,
+                timeout=30,
+            ) as resp:
+                resp.raise_for_status()
+                if progress_callback:
+                    progress_callback('playing', 0.5)
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if chunk:
+                        player.stdin.write(chunk)
+            player.stdin.close()
+            player.wait()
+            return True
+        except Exception:
+            try:
+                player.kill()
+            except Exception:
+                pass
+            raise
+
+    def _request_and_play(
+        self,
+        url: str,
+        headers: dict,
+        body: dict,
+        params: dict,
+        progress_callback=None,
+    ) -> bool:
+        """POST -> save temp MP3 -> play via AudioManager."""
+        resp = _requests.post(url, headers=headers, json=body, params=params, timeout=30)
+        resp.raise_for_status()
+        tmp = TEMP_DIR / 'tts_cloud_output.mp3'
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(resp.content)
+        if progress_callback:
+            progress_callback('playing', 1.0)
+        if self._audio_manager:
+            self._audio_manager.play_file(str(tmp), volume=self.volume)
+        return True

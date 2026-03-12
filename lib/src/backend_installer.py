@@ -2659,3 +2659,45 @@ def _cleanup_partial_installation(created_items: dict, pip_bin: Optional[Path]):
                        check=False, capture_output=True)
         except Exception:
             pass
+
+
+def setup_cloud_tts_provider(
+    provider_id: str,
+    api_key: str,
+    model: Optional[str] = None,
+    voice: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Configure a cloud TTS provider.
+    No pip install - stores credentials and writes config.
+    Returns (success, message).
+    """
+    try:
+        from .tts_provider_registry import get_provider as _get_tts_provider
+        from .credential_manager import save_credential
+        from .config_manager import ConfigManager
+    except ImportError:
+        from tts_provider_registry import get_provider as _get_tts_provider
+        from credential_manager import save_credential
+        from config_manager import ConfigManager
+
+    try:
+        provider = _get_tts_provider(provider_id)
+        if not provider:
+            return False, f"Unknown TTS provider: {provider_id}"
+
+        if not api_key:
+            return False, f"No API key provided for {provider_id}"
+
+        if not save_credential(provider_id, api_key):
+            return False, f"Failed to store API key for {provider_id}"
+
+        config = ConfigManager()
+        config.set_setting('tts_provider', provider_id)
+        config.set_setting('tts_cloud_model', model or provider['default_model'])
+        config.set_setting('tts_cloud_voice', voice or provider['default_voice'])
+        config.set_setting('tts_enabled', True)
+        config.save_config()
+        return True, f"{provider['name']} TTS configured"
+    except Exception as e:
+        return False, str(e)

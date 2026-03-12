@@ -112,6 +112,9 @@ class ConfigManager:
             'tts_volume': 1.0,               # Playback volume for TTS (0.1–1.0)
             'tts_osd_enabled': True,         # Show overlay during TTS playback
             'tts_osd_timeout': 30,           # Seconds before auto-hiding OSD (None = never auto-hide)
+            'tts_provider': 'pocket-tts',    # 'pocket-tts' | 'openai' | 'groq' | 'elevenlabs' | 'deepgram' | 'lemonfox'
+            'tts_cloud_model': None,         # Cloud model ID; None = provider default
+            'tts_cloud_voice': None,         # Cloud voice ID; None = provider default
         }
         
         # Set up config directory and file path

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from rich.prompt import Prompt, Confirm
+    from rich.prompt import Prompt, Confirm, IntPrompt
 except (ImportError, ModuleNotFoundError) as e:
     # Hard fail – rich is required for the CLI
     print("ERROR: python-rich is not available in this Python environment.", file=sys.stderr)
@@ -1567,14 +1567,90 @@ def setup_command(python_path: Optional[str] = None):
     print("Text-to-Speech (TTS)")
     print("="*60)
     print("\nSelect text and press a shortcut to hear it spoken aloud.")
-    print("Uses Pocket TTS (CPU-only, English, built-in voices).")
     setup_tts_choice = Confirm.ask("Enable text-to-speech?", default=False)
+
+    tts_backend = 'pocket-tts'
     tts_voice = 'alba'
+    tts_provider_id = None
+    tts_provider_model = None
+    tts_provider_voice = None
+
     if setup_tts_choice:
-        print("\nBuilt-in voices: alba, marius, javert, jean, fantine, cosette, eponine, azelma")
-        tts_voice_input = Prompt.ask("Voice to use", default="alba")
-        if tts_voice_input.strip().lower() in ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']:
-            tts_voice = tts_voice_input.strip().lower()
+        try:
+            from .tts_provider_registry import list_providers as _list_tts_providers, get_provider as _get_tts_provider
+        except ImportError:
+            from tts_provider_registry import list_providers as _list_tts_providers, get_provider as _get_tts_provider
+
+        backend_choice = Prompt.ask(
+            "TTS backend",
+            choices=["local", "cloud"],
+            default="local",
+        )
+
+        if backend_choice == "cloud":
+            tts_backend = 'cloud'
+            providers = _list_tts_providers()
+            print("\nAvailable cloud TTS providers:")
+            for i, (provider_id, provider_name, streaming) in enumerate(providers, 1):
+                latency = "(streaming, ~75–200ms)" if streaming else "(non-streaming)"
+                print(f"  {i}. {provider_name} {latency}")
+
+            idx = IntPrompt.ask("Select provider", default=1)
+            idx = max(1, min(len(providers), idx))
+            tts_provider_id, _, _ = providers[idx - 1]
+            provider_cfg = _get_tts_provider(tts_provider_id)
+
+            existing_key = get_credential(tts_provider_id)
+            if existing_key:
+                masked = existing_key[:6] + '...' + existing_key[-4:]
+                reuse = Confirm.ask(
+                    f"Found existing {provider_cfg['name']} key ({masked}) from STT setup. Use it?",
+                    default=True,
+                )
+                if not reuse:
+                    existing_key = None
+
+            if not existing_key:
+                try:
+                    from .tts_provider_registry import validate_api_key as _validate_tts_key
+                except ImportError:
+                    from tts_provider_registry import validate_api_key as _validate_tts_key
+
+                while True:
+                    key = Prompt.ask(f"Enter {provider_cfg['name']} API key")
+                    ok, err = _validate_tts_key(tts_provider_id, key)
+                    if ok:
+                        if save_credential(tts_provider_id, key):
+                            break
+                        print("[red]Failed to save API key[/red]")
+                        continue
+                    print(f"[red]Invalid key: {err}[/red]")
+
+            models = list(provider_cfg['models'].items())
+            if len(models) > 1:
+                print(f"\n{provider_cfg['name']} models:")
+                for i, (_, model_data) in enumerate(models, 1):
+                    print(f"  {i}. {model_data['name']} — {model_data['description']}")
+                midx = IntPrompt.ask("Select model", default=1)
+                midx = max(1, min(len(models), midx))
+                tts_provider_model = models[midx - 1][0]
+            else:
+                tts_provider_model = models[0][0]
+
+            voices = provider_cfg['voices']
+            print(f"\n{provider_cfg['name']} voices:")
+            for i, provider_voice in enumerate(voices, 1):
+                print(f"  {i}. {provider_voice}")
+            vidx = IntPrompt.ask("Select voice", default=1)
+            vidx = max(1, min(len(voices), vidx))
+            tts_provider_voice = voices[vidx - 1]
+        else:
+            print("Uses Pocket TTS (CPU-only, English, built-in voices).")
+            tts_voice_input = Prompt.ask("Voice to use", default="alba")
+            pocket_voices = ['alba', 'marius', 'javert', 'jean', 'fantine',
+                             'cosette', 'eponine', 'azelma']
+            if tts_voice_input.strip().lower() in pocket_voices:
+                tts_voice = tts_voice_input.strip().lower()
 
     # Step 3c: Audio ducking setup
     print("\n" + "="*60)
@@ -1675,7 +1751,12 @@ def setup_command(python_path: Optional[str] = None):
         print(f"Model: {selected_model}")
     print(f"Waybar integration: {'Yes' if setup_waybar_choice else 'No'}")
     print(f"Mic-OSD visualization: {'Yes' if setup_mic_osd_choice else 'No'}")
-    print(f"Text-to-speech (TTS): {'Yes' if setup_tts_choice else 'No'}" + (f" (voice: {tts_voice})" if setup_tts_choice else ""))
+    if setup_tts_choice and tts_backend == 'cloud':
+        print(f"Text-to-speech (TTS): Yes (cloud: {tts_provider_id}, voice: {tts_provider_voice})")
+    elif setup_tts_choice:
+        print(f"Text-to-speech (TTS): Yes (pocket-tts, voice: {tts_voice})")
+    else:
+        print("Text-to-speech (TTS): No")
     if setup_audio_ducking_choice:
         print(f"Audio ducking: Yes ({audio_ducking_percent}% reduction)")
     else:
@@ -1729,17 +1810,34 @@ def setup_command(python_path: Optional[str] = None):
 
         # Step 2b2: TTS
         if setup_tts_choice:
-            log_info("Installing Pocket TTS...")
-            if install_tts_backend(custom_python=python_path):
-                config = ConfigManager()
-                config.set_setting('tts_enabled', True)
-                config.set_setting('tts_voice', tts_voice)
-                config.set_setting('tts_shortcut', 'SUPER+ALT+S')
-                config.set_setting('tts_osd_enabled', True)
-                config.save_config()
-                log_success("Text-to-speech enabled")
+            if tts_backend == 'cloud':
+                try:
+                    from .backend_installer import setup_cloud_tts_provider
+                except ImportError:
+                    from backend_installer import setup_cloud_tts_provider
+                success, msg = setup_cloud_tts_provider(
+                    tts_provider_id,
+                    get_credential(tts_provider_id),
+                    model=tts_provider_model,
+                    voice=tts_provider_voice,
+                )
+                if success:
+                    log_success(f"Text-to-speech enabled ({msg})")
+                else:
+                    log_error(f"TTS cloud setup failed: {msg}")
             else:
-                log_error("TTS installation failed - continuing without TTS")
+                log_info("Installing Pocket TTS...")
+                if install_tts_backend(custom_python=python_path):
+                    config = ConfigManager()
+                    config.set_setting('tts_enabled', True)
+                    config.set_setting('tts_provider', 'pocket-tts')
+                    config.set_setting('tts_voice', tts_voice)
+                    config.set_setting('tts_shortcut', 'SUPER+ALT+S')
+                    config.set_setting('tts_osd_enabled', True)
+                    config.save_config()
+                    log_success("Text-to-speech enabled")
+                else:
+                    log_error("TTS installation failed - continuing without TTS")
         else:
             config = ConfigManager()
             config.set_setting('tts_enabled', False)
@@ -2180,9 +2278,11 @@ def omarchy_command(args=None):
 
     # Configure TTS if requested
     if enable_tts:
+        # Auto-setup always installs pocket-tts. Cloud TTS requires interactive setup.
         log_info("Installing Pocket TTS...")
         if install_tts_backend(custom_python=python_path):
             config.set_setting('tts_enabled', True)
+            config.set_setting('tts_provider', 'pocket-tts')
             config.set_setting('tts_voice', 'alba')
             config.set_setting('tts_shortcut', 'SUPER+ALT+S')
             config.set_setting('tts_osd_enabled', True)
@@ -2969,6 +3069,10 @@ def speak_command(args):
 
     config = ConfigManager()
     tts_manager = TTSManager(config)
+    if getattr(args, 'provider', None):
+        tts_manager.provider = args.provider
+    if getattr(args, 'model', None):
+        tts_manager.cloud_model = args.model
 
     def _cleanup_pid():
         try:
@@ -2998,7 +3102,11 @@ def speak_command(args):
 
     try:
         if not tts_manager.is_available():
-            log_error("Pocket TTS is not installed. Run: hyprwhspr setup  # and enable TTS")
+            provider = tts_manager.provider
+            if provider == 'pocket-tts':
+                log_error("Pocket TTS is not installed. Run: hyprwhspr setup  # and enable TTS")
+            else:
+                log_error(f"No API key found for {provider}. Run: hyprwhspr setup  # and configure TTS")
             return
 
         # Get text: --text > primary selection > clipboard
@@ -3016,7 +3124,11 @@ def speak_command(args):
             print("No text to read. Select text or use --text \"...\"")
             return
 
-        voice = getattr(args, 'voice', None) or config.get_setting('tts_voice', 'alba')
+        provider = tts_manager.provider
+        if provider == 'pocket-tts':
+            voice = getattr(args, 'voice', None) or config.get_setting('tts_voice', 'alba')
+        else:
+            voice = getattr(args, 'voice', None) or config.get_setting('tts_cloud_voice', None)
         tts_osd_enabled = config.get_setting('tts_osd_enabled', True)
 
         # TTS OSD runner
@@ -3046,9 +3158,15 @@ def speak_command(args):
                 if tts_osd_runner and tts_osd_runner.is_available():
                     tts_osd_runner.set_state('speaking', duration_sec=estimated_duration)
 
-            ok = tts_manager.synthesize_and_play_streaming(
-                text, voice=voice, volume=volume,
-                on_playback_started=on_playback_started,
+            if getattr(args, 'volume', None) is not None:
+                tts_manager.volume = max(0.1, min(1.0, float(args.volume)))
+
+            ok = tts_manager.speak(
+                text,
+                voice=voice,
+                progress_callback=(
+                    lambda state, p: on_playback_started() if state == 'playing' and on_playback_started else None
+                ) if on_playback_started else None,
             )
             if not ok:
                 if tts_osd_runner:
@@ -4886,4 +5004,3 @@ def record_command(action: str, language: str = None):
     else:
         log_error(f"Unknown action: {action}")
         log_info("Available actions: start, stop, cancel, toggle, status")
-
